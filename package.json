@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "faros-airbyte-cdk": "^0.1.23"
+  },
+  "name": "airbyte",
+  "devDependencies": {
+    "lerna": "^4.0.0"
+  }
+}
