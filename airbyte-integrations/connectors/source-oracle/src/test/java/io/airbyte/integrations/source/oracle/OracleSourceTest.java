@@ -21,9 +21,10 @@ import io.airbyte.protocol.models.AirbyteRecordMessage;
 import io.airbyte.protocol.models.CatalogHelpers;
 import io.airbyte.protocol.models.ConfiguredAirbyteCatalog;
 import io.airbyte.protocol.models.Field;
-import io.airbyte.protocol.models.JsonSchemaPrimitive;
+import io.airbyte.protocol.models.JsonSchemaType;
 import io.airbyte.protocol.models.SyncMode;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,13 +41,13 @@ class OracleSourceTest {
   private static final AirbyteCatalog CATALOG = new AirbyteCatalog().withStreams(List.of(
       CatalogHelpers.createAirbyteStream(
           STREAM_NAME,
-          Field.of("ID", JsonSchemaPrimitive.NUMBER),
-          Field.of("NAME", JsonSchemaPrimitive.STRING),
-          Field.of("IMAGE", JsonSchemaPrimitive.STRING))
+          Field.of("ID", JsonSchemaType.NUMBER),
+          Field.of("NAME", JsonSchemaType.STRING),
+          Field.of("IMAGE", JsonSchemaType.STRING))
           .withSupportedSyncModes(Lists.newArrayList(SyncMode.FULL_REFRESH, SyncMode.INCREMENTAL))));
   private static final ConfiguredAirbyteCatalog CONFIGURED_CATALOG = CatalogHelpers.toDefaultConfiguredCatalog(CATALOG);
-  private static final Set<AirbyteMessage> ASCII_MESSAGES = Sets.newHashSet(
-      createRecord(STREAM_NAME, map("ID", new BigDecimal("1.0"), "NAME", "user", "IMAGE", "last_summer.png".getBytes())));
+  private static final Set<AirbyteMessage> ASCII_MESSAGES = Sets.newHashSet(createRecord(STREAM_NAME,
+      map("ID", new BigDecimal("1.0"), "NAME", "user", "IMAGE", "last_summer.png".getBytes(StandardCharsets.UTF_8))));
 
   private static OracleContainer ORACLE_DB;
 

@@ -28,7 +28,7 @@ import io.airbyte.protocol.models.AirbyteStream;
 import io.airbyte.protocol.models.CatalogHelpers;
 import io.airbyte.protocol.models.ConfiguredAirbyteCatalog;
 import io.airbyte.protocol.models.Field;
-import io.airbyte.protocol.models.JsonSchemaPrimitive;
+import io.airbyte.protocol.models.JsonSchemaType;
 import io.airbyte.protocol.models.SyncMode;
 import io.airbyte.test.utils.PostgreSQLContainerHelper;
 import java.math.BigDecimal;
@@ -54,38 +54,38 @@ class PostgresSourceTest {
       CatalogHelpers.createAirbyteStream(
           STREAM_NAME,
           SCHEMA_NAME,
-          Field.of("id", JsonSchemaPrimitive.NUMBER),
-          Field.of("name", JsonSchemaPrimitive.STRING),
-          Field.of("power", JsonSchemaPrimitive.NUMBER))
+          Field.of("id", JsonSchemaType.NUMBER),
+          Field.of("name", JsonSchemaType.STRING),
+          Field.of("power", JsonSchemaType.NUMBER))
           .withSupportedSyncModes(Lists.newArrayList(SyncMode.FULL_REFRESH, SyncMode.INCREMENTAL))
           .withSourceDefinedPrimaryKey(List.of(List.of("id"))),
       CatalogHelpers.createAirbyteStream(
           STREAM_NAME + "2",
           SCHEMA_NAME,
-          Field.of("id", JsonSchemaPrimitive.NUMBER),
-          Field.of("name", JsonSchemaPrimitive.STRING),
-          Field.of("power", JsonSchemaPrimitive.NUMBER))
+          Field.of("id", JsonSchemaType.NUMBER),
+          Field.of("name", JsonSchemaType.STRING),
+          Field.of("power", JsonSchemaType.NUMBER))
           .withSupportedSyncModes(Lists.newArrayList(SyncMode.FULL_REFRESH, SyncMode.INCREMENTAL)),
       CatalogHelpers.createAirbyteStream(
           "names",
           SCHEMA_NAME,
-          Field.of("first_name", JsonSchemaPrimitive.STRING),
-          Field.of("last_name", JsonSchemaPrimitive.STRING),
-          Field.of("power", JsonSchemaPrimitive.NUMBER))
+          Field.of("first_name", JsonSchemaType.STRING),
+          Field.of("last_name", JsonSchemaType.STRING),
+          Field.of("power", JsonSchemaType.NUMBER))
           .withSupportedSyncModes(Lists.newArrayList(SyncMode.FULL_REFRESH, SyncMode.INCREMENTAL))
           .withSourceDefinedPrimaryKey(List.of(List.of("first_name"), List.of("last_name"))),
       CatalogHelpers.createAirbyteStream(
           STREAM_NAME_PRIVILEGES_TEST_CASE,
           SCHEMA_NAME,
-          Field.of("id", JsonSchemaPrimitive.NUMBER),
-          Field.of("name", JsonSchemaPrimitive.STRING))
+          Field.of("id", JsonSchemaType.NUMBER),
+          Field.of("name", JsonSchemaType.STRING))
           .withSupportedSyncModes(Lists.newArrayList(SyncMode.FULL_REFRESH, SyncMode.INCREMENTAL))
           .withSourceDefinedPrimaryKey(List.of(List.of("id"))),
       CatalogHelpers.createAirbyteStream(
           STREAM_NAME_PRIVILEGES_TEST_CASE_VIEW,
           SCHEMA_NAME,
-          Field.of("id", JsonSchemaPrimitive.NUMBER),
-          Field.of("name", JsonSchemaPrimitive.STRING))
+          Field.of("id", JsonSchemaType.NUMBER),
+          Field.of("name", JsonSchemaType.STRING))
           .withSupportedSyncModes(Lists.newArrayList(SyncMode.FULL_REFRESH, SyncMode.INCREMENTAL))
           .withSourceDefinedPrimaryKey(List.of(List.of("id")))));
   private static final ConfiguredAirbyteCatalog CONFIGURED_CATALOG = CatalogHelpers.toDefaultConfiguredCatalog(CATALOG);
@@ -171,6 +171,7 @@ class PostgresSourceTest {
         .put("host", psqlDb.getHost())
         .put("port", psqlDb.getFirstMappedPort())
         .put("database", dbName)
+        .put("schemas", List.of(SCHEMA_NAME))
         .put("username", psqlDb.getUsername())
         .put("password", psqlDb.getPassword())
         .put("ssl", false)
@@ -182,6 +183,7 @@ class PostgresSourceTest {
         .put("host", psqlDb.getHost())
         .put("port", psqlDb.getFirstMappedPort())
         .put("database", dbName)
+        .put("schemas", List.of(SCHEMA_NAME))
         .put("username", user)
         .put("password", password)
         .put("ssl", false)
@@ -270,6 +272,52 @@ class PostgresSourceTest {
       assertTrue(expectedStream.isPresent());
       assertEquals(expectedStream.get(), actualStream);
     });
+  }
+
+  @Test
+  void testDiscoverRecursiveRolePermissions() throws Exception {
+    try (final PostgreSQLContainer<?> db = new PostgreSQLContainer<>("postgres:13-alpine")) {
+      db.start();
+      final JsonNode config = getConfig(db);
+      try (final Database database = getDatabaseFromConfig(config)) {
+        database.query(ctx -> {
+          ctx.fetch("CREATE TABLE id_and_name_7(id INTEGER, name VARCHAR(200));");
+          ctx.fetch("CREATE TABLE id_and_name(id INTEGER, name VARCHAR(200));");
+
+          ctx.fetch("CREATE USER test_user_4 password '132';");
+
+          ctx.fetch("CREATE ROLE airbyte LOGIN password 'airbyte';");
+          ctx.fetch("CREATE ROLE read_only LOGIN password 'read_only';");
+          ctx.fetch("CREATE ROLE intermediate LOGIN password 'intermediate';");
+
+          ctx.fetch("CREATE ROLE access_nothing LOGIN password 'access_nothing';");
+
+          ctx.fetch("GRANT intermediate TO airbyte;");
+          ctx.fetch("GRANT read_only TO intermediate;");
+
+          ctx.fetch("GRANT SELECT ON id_and_name, id_and_name_7 TO read_only;");
+          ctx.fetch("GRANT airbyte TO test_user_4;");
+
+          ctx.fetch("CREATE TABLE unseen(id INTEGER, name VARCHAR(200));");
+          ctx.fetch("GRANT CONNECT ON DATABASE test TO test_user_4;");
+          return null;
+        });
+      }
+      try (final Database database = getDatabaseWithSpecifiedUser(config, "test_user_4", "132")) {
+        database.query(ctx -> {
+          ctx.fetch("CREATE TABLE id_and_name_3(id INTEGER, name VARCHAR(200));");
+          return null;
+        });
+      }
+      AirbyteCatalog actual = new PostgresSource().discover(getConfig(db, "test_user_4", "132"));
+      Set<String> tableNames = actual.getStreams().stream().map(stream -> stream.getName()).collect(Collectors.toSet());
+      assertEquals(Sets.newHashSet("id_and_name", "id_and_name_7", "id_and_name_3"), tableNames);
+
+      actual = new PostgresSource().discover(getConfig(db, "access_nothing", "access_nothing"));
+      tableNames = actual.getStreams().stream().map(stream -> stream.getName()).collect(Collectors.toSet());
+      assertEquals(Sets.newHashSet(), tableNames);
+      db.stop();
+    }
   }
 
   @Test

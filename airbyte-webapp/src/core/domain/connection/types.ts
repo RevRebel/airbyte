@@ -1,7 +1,9 @@
 import { SyncSchema } from "core/domain/catalog";
-import { Operation } from "./operation";
 import { AirbyteJSONSchema } from "core/jsonSchema";
+import Status from "core/statuses";
+
 import { Destination, Source } from "../connector";
+import { Operation } from "./operation";
 
 type ConnectionConfiguration = unknown;
 
@@ -15,10 +17,24 @@ export enum ConnectionNamespaceDefinition {
   CustomFormat = "customformat",
 }
 
+export enum ConnectionSchedule {
+  Minutes = "minutes",
+  Hours = "hours",
+  Days = "days",
+  Weeks = "weeks",
+  Months = "months",
+}
+
 export type ScheduleProperties = {
   units: number;
-  timeUnit: string;
+  timeUnit: ConnectionSchedule;
 };
+
+export enum ConnectionStatus {
+  ACTIVE = "active",
+  INACTIVE = "inactive",
+  DEPRECATED = "deprecated",
+}
 
 export interface Connection {
   connectionId: string;
@@ -26,18 +42,19 @@ export interface Connection {
   prefix: string;
   sourceId: string;
   destinationId: string;
-  status: string;
+  status: ConnectionStatus;
   schedule: ScheduleProperties | null;
   syncCatalog: SyncSchema;
   latestSyncJobCreatedAt?: number | null;
   namespaceDefinition: ConnectionNamespaceDefinition;
   namespaceFormat: string;
   isSyncing?: boolean;
-  latestSyncJobStatus: string | null;
+  latestSyncJobStatus: Status | null;
   operationIds: string[];
 
   // WebBackend connection specific fields
   source: Source;
   destination: Destination;
   operations: Operation[];
+  catalogId: string;
 }

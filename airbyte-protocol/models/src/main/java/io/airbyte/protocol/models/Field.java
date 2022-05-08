@@ -4,18 +4,31 @@
 
 package io.airbyte.protocol.models;
 
-public class Field extends CommonField<JsonSchemaPrimitive> {
+import java.util.List;
 
-  public Field(final String name, final JsonSchemaPrimitive type) {
+public class Field extends CommonField<JsonSchemaType> {
+
+  private List<Field> subFields;
+
+  public Field(final String name, final JsonSchemaType type) {
     super(name, type);
   }
 
-  public static Field of(final String name, final JsonSchemaPrimitive type) {
+  public Field(final String name, final JsonSchemaType type, List<Field> subFields) {
+    super(name, type);
+    this.subFields = subFields;
+  }
+
+  public static Field of(final String name, final JsonSchemaType type) {
     return new Field(name, type);
   }
 
-  public String getTypeAsJsonSchemaString() {
-    return getType().name().toLowerCase();
+  public static Field of(final String name, final JsonSchemaType type, List<Field> properties) {
+    return new Field(name, type, properties);
+  }
+
+  public List<Field> getSubFields() {
+    return subFields;
   }
 
 }

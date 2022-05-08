@@ -5,6 +5,7 @@
 package io.airbyte.db.jdbc;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.google.errorprone.annotations.MustBeClosed;
 import io.airbyte.commons.functional.CheckedConsumer;
 import io.airbyte.commons.functional.CheckedFunction;
 import io.airbyte.db.JdbcCompatibleSourceOperations;
@@ -13,6 +14,7 @@ import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Spliterator;
@@ -57,20 +59,23 @@ public abstract class JdbcDatabase extends SqlDatabase {
   }
 
   /**
-   * Map records returned in a result set.
+   * Map records returned in a result set. It is an "unsafe" stream because the stream must be
+   * manually closed. Otherwise, there will be a database connection leak.
    *
    * @param resultSet the result set
    * @param mapper function to make each record of the result set
    * @param <T> type that each record will be mapped to
    * @return stream of records that the result set is mapped to.
    */
-  public static <T> Stream<T> toStream(final ResultSet resultSet, final CheckedFunction<ResultSet, T, SQLException> mapper) {
+  @MustBeClosed
+  protected static <T> Stream<T> toUnsafeStream(final ResultSet resultSet, final CheckedFunction<ResultSet, T, SQLException> mapper) {
     return StreamSupport.stream(new Spliterators.AbstractSpliterator<>(Long.MAX_VALUE, Spliterator.ORDERED) {
 
       @Override
       public boolean tryAdvance(final Consumer<? super T> action) {
         try {
           if (!resultSet.next()) {
+            resultSet.close();
             return false;
           }
           action.accept(mapper.apply(resultSet));
@@ -104,8 +109,8 @@ public abstract class JdbcDatabase extends SqlDatabase {
    * Use a connection to create a {@link ResultSet} and map it into a stream. You CANNOT assume that
    * data will be returned from this method before the entire {@link ResultSet} is buffered in memory.
    * Review the implementation of the database's JDBC driver or use the StreamingJdbcDriver if you
-   * need this guarantee. The caller should close the returned stream to release the database
-   * connection.
+   * need this guarantee. It is "unsafe" because the caller should close the returned stream to
+   * release the database connection. Otherwise, there will be a connection leak.
    *
    * @param query execute a query using a {@link Connection} to get a {@link ResultSet}.
    * @param recordTransform transform each record of that result set into the desired type. do NOT
@@ -115,16 +120,30 @@ public abstract class JdbcDatabase extends SqlDatabase {
    * @return Result of the query mapped to a stream.
    * @throws SQLException SQL related exceptions.
    */
-  public abstract <T> Stream<T> resultSetQuery(CheckedFunction<Connection, ResultSet, SQLException> query,
-                                               CheckedFunction<ResultSet, T, SQLException> recordTransform)
+  @MustBeClosed
+  public abstract <T> Stream<T> unsafeResultSetQuery(CheckedFunction<Connection, ResultSet, SQLException> query,
+                                                     CheckedFunction<ResultSet, T, SQLException> recordTransform)
       throws SQLException;
+
+  /**
+   * String query is a common use case for {@link JdbcDatabase#unsafeResultSetQuery}. So this method
+   * is created as syntactic sugar.
+   */
+  public List<String> queryStrings(final CheckedFunction<Connection, ResultSet, SQLException> query,
+                                   final CheckedFunction<ResultSet, String, SQLException> recordTransform)
+      throws SQLException {
+    try (final Stream<String> stream = unsafeResultSetQuery(query, recordTransform)) {
+      return stream.toList();
+    }
+  }
 
   /**
    * Use a connection to create a {@link PreparedStatement} and map it into a stream. You CANNOT
    * assume that data will be returned from this method before the entire {@link ResultSet} is
    * buffered in memory. Review the implementation of the database's JDBC driver or use the
-   * StreamingJdbcDriver if you need this guarantee. The caller should close the returned stream to
-   * release the database connection.
+   * StreamingJdbcDriver if you need this guarantee. It is "unsafe" because the caller should close
+   * the returned stream to release the database connection. Otherwise, there will be a connection
+   * leak.
    *
    * @param statementCreator create a {@link PreparedStatement} from a {@link Connection}.
    * @param recordTransform transform each record of that result set into the desired type. do NOT
@@ -134,12 +153,26 @@ public abstract class JdbcDatabase extends SqlDatabase {
    * @return Result of the query mapped to a stream.void execute(String sql)
    * @throws SQLException SQL related exceptions.
    */
-  public abstract <T> Stream<T> query(CheckedFunction<Connection, PreparedStatement, SQLException> statementCreator,
-                                      CheckedFunction<ResultSet, T, SQLException> recordTransform)
+  @MustBeClosed
+  public abstract <T> Stream<T> unsafeQuery(CheckedFunction<Connection, PreparedStatement, SQLException> statementCreator,
+                                            CheckedFunction<ResultSet, T, SQLException> recordTransform)
       throws SQLException;
 
+  /**
+   * Json query is a common use case for
+   * {@link JdbcDatabase#unsafeQuery(CheckedFunction, CheckedFunction)}. So this method is created as
+   * syntactic sugar.
+   */
+  public List<JsonNode> queryJsons(final CheckedFunction<Connection, PreparedStatement, SQLException> statementCreator,
+                                   final CheckedFunction<ResultSet, JsonNode, SQLException> recordTransform)
+      throws SQLException {
+    try (final Stream<JsonNode> stream = unsafeQuery(statementCreator, recordTransform)) {
+      return stream.toList();
+    }
+  }
+
   public int queryInt(final String sql, final String... params) throws SQLException {
-    try (final Stream<Integer> q = query(c -> {
+    try (final Stream<Integer> stream = unsafeQuery(c -> {
       PreparedStatement statement = c.prepareStatement(sql);
       int i = 1;
       for (String param : params) {
@@ -147,15 +180,19 @@ public abstract class JdbcDatabase extends SqlDatabase {
         ++i;
       }
       return statement;
-    },
-        rs -> rs.getInt(1))) {
-      return q.findFirst().get();
+    }, rs -> rs.getInt(1))) {
+      return stream.findFirst().get();
     }
   }
 
+  /**
+   * It is "unsafe" because the caller must manually close the returned stream. Otherwise, there will
+   * be a database connection leak.
+   */
+  @MustBeClosed
   @Override
-  public Stream<JsonNode> query(final String sql, final String... params) throws SQLException {
-    return query(connection -> {
+  public Stream<JsonNode> unsafeQuery(final String sql, final String... params) throws SQLException {
+    return unsafeQuery(connection -> {
       final PreparedStatement statement = connection.prepareStatement(sql);
       int i = 1;
       for (final String param : params) {
@@ -164,6 +201,31 @@ public abstract class JdbcDatabase extends SqlDatabase {
       }
       return statement;
     }, sourceOperations::rowToJson);
+  }
+
+  /**
+   * Json query is a common use case for {@link JdbcDatabase#unsafeQuery(String, String...)}. So this
+   * method is created as syntactic sugar.
+   */
+  public List<JsonNode> queryJsons(final String sql, final String... params) throws SQLException {
+    try (final Stream<JsonNode> stream = unsafeQuery(sql, params)) {
+      return stream.toList();
+    }
+  }
+
+  public ResultSetMetaData queryMetadata(final String sql, final String... params) throws SQLException {
+    try (final Stream<ResultSetMetaData> q = unsafeQuery(c -> {
+      PreparedStatement statement = c.prepareStatement(sql);
+      int i = 1;
+      for (String param : params) {
+        statement.setString(i, param);
+        ++i;
+      }
+      return statement;
+    },
+        ResultSet::getMetaData)) {
+      return q.findFirst().orElse(null);
+    }
   }
 
   public abstract DatabaseMetaData getMetaData() throws SQLException;

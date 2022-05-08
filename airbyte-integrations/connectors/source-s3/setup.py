@@ -6,7 +6,7 @@
 from setuptools import find_packages, setup
 
 MAIN_REQUIREMENTS = [
-    "airbyte-cdk~=0.1.28",
+    "airbyte-cdk",
     "pyarrow==4.0.1",
     "smart-open[s3]==5.1.0",
     "wcmatch==8.2",
@@ -18,6 +18,10 @@ TEST_REQUIREMENTS = [
     "pytest~=6.1",
     "source-acceptance-test",
     "pandas==1.3.1",
+    "psutil",
+    "pytest-order",
+    "netifaces~=0.11.0",
+    "docker",
 ]
 
 setup(

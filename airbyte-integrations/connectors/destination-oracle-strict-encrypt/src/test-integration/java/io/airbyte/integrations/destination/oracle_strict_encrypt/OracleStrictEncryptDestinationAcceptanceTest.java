@@ -15,6 +15,7 @@ import io.airbyte.commons.string.Strings;
 import io.airbyte.db.Database;
 import io.airbyte.db.Databases;
 import io.airbyte.db.jdbc.JdbcDatabase;
+import io.airbyte.db.jdbc.JdbcUtils;
 import io.airbyte.integrations.destination.ExtendedNameTransformer;
 import io.airbyte.integrations.destination.oracle.OracleDestination;
 import io.airbyte.integrations.destination.oracle.OracleNameTransformer;
@@ -77,7 +78,7 @@ public class OracleStrictEncryptDestinationAcceptanceTest extends DestinationAcc
 
   @Override
   protected boolean supportsDBT() {
-    return true;
+    return false;
   }
 
   @Override
@@ -111,12 +112,8 @@ public class OracleStrictEncryptDestinationAcceptanceTest extends DestinationAcc
 
   private List<JsonNode> retrieveRecordsFromTable(final String tableName, final String schemaName)
       throws SQLException {
-    final List<org.jooq.Record> result = getDatabase(config)
-        .query(ctx -> ctx.fetch(
-            String.format("SELECT * FROM %s.%s ORDER BY %s ASC", schemaName, tableName,
-                OracleDestination.COLUMN_NAME_EMITTED_AT))
-            .stream()
-            .collect(Collectors.toList()));
+    final String query = String.format("SELECT * FROM %s.%s ORDER BY %s ASC", schemaName, tableName, OracleDestination.COLUMN_NAME_EMITTED_AT);
+    final List<org.jooq.Record> result = getDatabase(config).query(ctx -> ctx.fetch(query).stream().toList());
     return result
         .stream()
         .map(r -> r.formatJSON(JSON_FORMAT))
@@ -176,13 +173,12 @@ public class OracleStrictEncryptDestinationAcceptanceTest extends DestinationAcc
             config.get("port").asText(),
             config.get("sid").asText()),
         "oracle.jdbc.driver.OracleDriver",
-        "oracle.net.encryption_client=REQUIRED;" +
-            "oracle.net.encryption_types_client=( "
-            + algorithm + " )");
+        JdbcUtils.parseJdbcParameters("oracle.net.encryption_client=REQUIRED;" +
+            "oracle.net.encryption_types_client=( " + algorithm + " )", ";"));
 
-    final String network_service_banner =
+    final String networkServiceBanner =
         "select network_service_banner from v$session_connect_info where sid in (select distinct sid from v$mystat)";
-    final List<JsonNode> collect = database.query(network_service_banner).collect(Collectors.toList());
+    final List<JsonNode> collect = database.queryJsons(networkServiceBanner);
 
     assertThat(collect.get(2).get("NETWORK_SERVICE_BANNER").asText(),
         equals("Oracle Advanced Security: " + algorithm + " encryption"));
@@ -202,12 +198,11 @@ public class OracleStrictEncryptDestinationAcceptanceTest extends DestinationAcc
             clone.get("port").asText(),
             clone.get("sid").asText()),
         "oracle.jdbc.driver.OracleDriver",
-        "oracle.net.encryption_client=REQUIRED;" +
-            "oracle.net.encryption_types_client=( "
-            + algorithm + " )");
+        JdbcUtils.parseJdbcParameters("oracle.net.encryption_client=REQUIRED;" +
+            "oracle.net.encryption_types_client=( " + algorithm + " )", ";"));
 
-    final String network_service_banner = "SELECT sys_context('USERENV', 'NETWORK_PROTOCOL') as network_protocol FROM dual";
-    final List<JsonNode> collect = database.query(network_service_banner).collect(Collectors.toList());
+    final String networkServiceBanner = "SELECT sys_context('USERENV', 'NETWORK_PROTOCOL') as network_protocol FROM dual";
+    final List<JsonNode> collect = database.queryJsons(networkServiceBanner);
 
     assertEquals("tcp", collect.get(0).get("NETWORK_PROTOCOL").asText());
   }

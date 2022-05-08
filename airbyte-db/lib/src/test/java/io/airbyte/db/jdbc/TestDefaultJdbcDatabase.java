@@ -16,9 +16,9 @@ import io.airbyte.db.Databases;
 import io.airbyte.test.utils.PostgreSQLContainerHelper;
 import java.sql.SQLException;
 import java.util.List;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -33,33 +33,13 @@ public class TestDefaultJdbcDatabase {
       Jsons.jsonNode(ImmutableMap.of("id", 3, "name", "vash")));
 
   private static PostgreSQLContainer<?> PSQL_DB;
-
-  private JsonNode config;
   private final JdbcSourceOperations sourceOperations = JdbcUtils.getDefaultSourceOperations();
+  private JdbcDatabase database;
 
   @BeforeAll
   static void init() {
     PSQL_DB = new PostgreSQLContainer<>("postgres:13-alpine");
     PSQL_DB.start();
-
-  }
-
-  @BeforeEach
-  void setup() throws Exception {
-    final String dbName = Strings.addRandomSuffix("db", "_", 10);
-
-    config = getConfig(PSQL_DB, dbName);
-
-    final String initScriptName = "init_" + dbName.concat(".sql");
-    final String tmpFilePath = IOs.writeFileToRandomTmpDir(initScriptName, "CREATE DATABASE " + dbName + ";");
-    PostgreSQLContainerHelper.runSqlScript(MountableFile.forHostPath(tmpFilePath), PSQL_DB);
-
-    final JdbcDatabase database = getDatabaseFromConfig(config);
-    database.execute(connection -> {
-      connection.createStatement().execute("CREATE TABLE id_and_name(id INTEGER, name VARCHAR(200));");
-      connection.createStatement().execute("INSERT INTO id_and_name (id, name) VALUES (1,'picard'),  (2, 'crusher'), (3, 'vash');");
-    });
-    database.close();
   }
 
   @AfterAll
@@ -67,9 +47,30 @@ public class TestDefaultJdbcDatabase {
     PSQL_DB.close();
   }
 
+  @BeforeEach
+  void setup() throws Exception {
+    final String dbName = Strings.addRandomSuffix("db", "_", 10);
+
+    final JsonNode config = getConfig(PSQL_DB, dbName);
+    final String initScriptName = "init_" + dbName.concat(".sql");
+    final String tmpFilePath = IOs.writeFileToRandomTmpDir(initScriptName, "CREATE DATABASE " + dbName + ";");
+    PostgreSQLContainerHelper.runSqlScript(MountableFile.forHostPath(tmpFilePath), PSQL_DB);
+
+    database = getDatabaseFromConfig(config);
+    database.execute(connection -> {
+      connection.createStatement().execute("CREATE TABLE id_and_name(id INTEGER, name VARCHAR(200));");
+      connection.createStatement().execute("INSERT INTO id_and_name (id, name) VALUES (1,'picard'),  (2, 'crusher'), (3, 'vash');");
+    });
+  }
+
+  @AfterEach
+  void close() throws Exception {
+    database.close();
+  }
+
   @Test
   void testBufferedResultQuery() throws SQLException {
-    final List<JsonNode> actual = getDatabaseFromConfig(config).bufferedResultSetQuery(
+    final List<JsonNode> actual = database.bufferedResultSetQuery(
         connection -> connection.createStatement().executeQuery("SELECT * FROM id_and_name;"),
         sourceOperations::rowToJson);
 
@@ -78,22 +79,19 @@ public class TestDefaultJdbcDatabase {
 
   @Test
   void testResultSetQuery() throws SQLException {
-    final Stream<JsonNode> actual = getDatabaseFromConfig(config).resultSetQuery(
+    try (final Stream<JsonNode> actual = database.unsafeResultSetQuery(
         connection -> connection.createStatement().executeQuery("SELECT * FROM id_and_name;"),
-        sourceOperations::rowToJson);
-    final List<JsonNode> actualAsList = actual.collect(Collectors.toList());
-    actual.close();
-
-    assertEquals(RECORDS_AS_JSON, actualAsList);
+        sourceOperations::rowToJson)) {
+      assertEquals(RECORDS_AS_JSON, actual.toList());
+    }
   }
 
   @Test
   void testQuery() throws SQLException {
-    final Stream<JsonNode> actual = getDatabaseFromConfig(config).query(
+    final List<JsonNode> actual = database.queryJsons(
         connection -> connection.prepareStatement("SELECT * FROM id_and_name;"),
         sourceOperations::rowToJson);
-
-    assertEquals(RECORDS_AS_JSON, actual.collect(Collectors.toList()));
+    assertEquals(RECORDS_AS_JSON, actual);
   }
 
   private JdbcDatabase getDatabaseFromConfig(final JsonNode config) {

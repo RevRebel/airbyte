@@ -1,30 +1,17 @@
 import React, { useMemo } from "react";
 import { FormattedMessage } from "react-intl";
-
 import styled from "styled-components";
 
-import { DropDownRow } from "components";
-import { MainInfoCell } from "./components/MainInfoCell";
-import { Cell } from "components/SimpleTableComponents";
-import { SyncSettingsCell } from "./components/SyncSettingsCell";
-import {
-  DestinationSyncMode,
-  SyncMode,
-  SyncSchemaField,
-  SyncSchemaStream,
-} from "core/domain/catalog";
-import { Popout } from "components/base/Popout";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faSortDown } from "@fortawesome/free-solid-svg-icons";
-import Tooltip from "./components/Tooltip";
+import { Cell, CheckBox, DropDownRow, Toggle } from "components";
 
-const Arrow = styled(FontAwesomeIcon)<{ isOpen?: boolean }>`
-  color: ${({ theme }) => theme.greyColor40};
-  margin-left: 6px;
-  transform: ${({ isOpen }) => isOpen && "rotate(180deg)"};
-  transition: 0.3s;
-  vertical-align: sub;
-`;
+import { DestinationSyncMode, Path, SyncMode, SyncSchemaField, SyncSchemaStream } from "core/domain/catalog";
+import { useBulkEditSelect } from "hooks/services/BulkEdit/BulkEditService";
+
+import { ConnectionFormMode } from "../ConnectionForm/ConnectionForm";
+import { Arrow as ArrowBlock } from "./components/Arrow";
+import { IndexerType, PathPopout } from "./components/PathPopout";
+import { SyncSettingsDropdown } from "./components/SyncSettingsDropdown";
+import { ArrowCell, CheckboxCell, HeaderCell } from "./styles";
 
 const EmptyField = styled.span`
   color: ${({ theme }) => theme.greyColor40};
@@ -47,17 +34,16 @@ interface StreamHeaderProps {
 
   primitiveFields: SyncSchemaField[];
 
-  pkType: null | "required" | "sourceDefined";
-  onPrimaryKeyChange: (pkPath: string[][]) => void;
-  cursorType: null | "required" | "sourceDefined";
-  onCursorChange: (cursorPath: string[]) => void;
+  pkType: IndexerType;
+  onPrimaryKeyChange: (pkPath: Path[]) => void;
+  cursorType: IndexerType;
+  onCursorChange: (cursorPath: Path) => void;
 
   isRowExpanded: boolean;
   hasFields: boolean;
   onExpand: () => void;
+  mode?: ConnectionFormMode;
 }
-
-const PkPopupComponents = { MultiValue: () => null };
 
 export const StreamHeader: React.FC<StreamHeaderProps> = ({
   stream,
@@ -74,13 +60,11 @@ export const StreamHeader: React.FC<StreamHeaderProps> = ({
   isRowExpanded,
   hasFields,
   onExpand,
+  mode,
 }) => {
-  const {
-    primaryKey,
-    syncMode,
-    cursorField,
-    destinationSyncMode,
-  } = stream.config;
+  const { primaryKey, syncMode, cursorField, destinationSyncMode } = stream.config;
+
+  const { defaultCursorField } = stream.stream;
   const syncSchema = useMemo(
     () => ({
       syncMode,
@@ -89,87 +73,71 @@ export const StreamHeader: React.FC<StreamHeaderProps> = ({
     [syncMode, destinationSyncMode]
   );
 
-  const dropdownFields = primitiveFields.map((field) => ({
-    value: field.path,
-    label: field.path.join("."),
-  }));
+  const [isSelected, selectForBulkEdit] = useBulkEditSelect(stream.id);
+
+  const paths = primitiveFields.map((field) => field.path);
 
   return (
     <>
-      <MainInfoCell
-        label={stream.stream.name}
-        onCheckBoxClick={onSelectStream}
-        onExpand={onExpand}
-        isItemChecked={stream.config.selected}
-        isItemHasChildren={hasFields}
-        isItemOpen={isRowExpanded}
-      />
-      <Cell ellipsis title={stream.stream.namespace || ""}>
+      {mode !== "readonly" && (
+        <CheckboxCell>
+          <CheckBox checked={isSelected} onChange={selectForBulkEdit} />
+        </CheckboxCell>
+      )}
+      <ArrowCell>
+        {hasFields ? <ArrowBlock onExpand={onExpand} isItemHasChildren={hasFields} isItemOpen={isRowExpanded} /> : null}
+      </ArrowCell>
+      <HeaderCell flex={0.4}>
+        <Toggle small checked={stream.config.selected} onChange={onSelectStream} disabled={mode === "readonly"} />
+      </HeaderCell>
+      <HeaderCell ellipsis title={stream.stream.namespace || ""}>
         {stream.stream.namespace || (
           <EmptyField>
             <FormattedMessage id="form.noNamespace" />
           </EmptyField>
         )}
+      </HeaderCell>
+      <HeaderCell ellipsis title={stream.stream.name || ""}>
+        {stream.stream.name}
+      </HeaderCell>
+      <Cell flex={1.5}>
+        {mode !== "readonly" ? (
+          <SyncSettingsDropdown value={syncSchema} options={availableSyncModes} onChange={onSelectSyncMode} />
+        ) : (
+          <HeaderCell ellipsis title={`${syncSchema.syncMode} | ${syncSchema.destinationSyncMode}`}>
+            {syncSchema.syncMode} | {syncSchema.destinationSyncMode}
+          </HeaderCell>
+        )}
       </Cell>
-      <Cell ellipsis light title={destNamespace}>
-        {destNamespace}
-      </Cell>
-      <Cell ellipsis title={destName}>
-        {destName}
-      </Cell>
-      <SyncSettingsCell
-        value={syncSchema}
-        options={availableSyncModes}
-        onChange={onSelectSyncMode}
-      />
-      <Cell ellipsis>
-        {pkType === "required" ? (
-          <Popout
-            options={dropdownFields}
-            value={primaryKey}
-            // @ts-ignore need to solve issue with typings
+      <HeaderCell>
+        {cursorType && (
+          <PathPopout
+            pathType={cursorType}
+            paths={paths}
+            path={cursorType === "sourceDefined" ? defaultCursorField : cursorField}
+            placeholder={<FormattedMessage id="connectionForm.cursor.searchPlaceholder" />}
+            onPathChange={onCursorChange}
+          />
+        )}
+      </HeaderCell>
+      <HeaderCell ellipsis>
+        {pkType && (
+          <PathPopout
+            pathType={pkType}
+            paths={paths}
+            path={primaryKey}
             isMulti={true}
-            isSearchable
-            onChange={(options: { value: string[] }[]) => {
-              onPrimaryKeyChange(options.map((op) => op.value));
-            }}
-            placeholder={
-              <FormattedMessage id="connectionForm.primaryKey.searchPlaceholder" />
-            }
-            components={PkPopupComponents}
-            targetComponent={({ onOpen }) => (
-              <div onClick={onOpen}>
-                {primaryKey.map((k) => k.join(".")).join(", ")}
-                <Arrow icon={faSortDown} />
-                <Tooltip items={primaryKey.map((k) => k.join("."))} />
-              </div>
-            )}
+            placeholder={<FormattedMessage id="connectionForm.primaryKey.searchPlaceholder" />}
+            onPathChange={onPrimaryKeyChange}
           />
-        ) : pkType === "sourceDefined" ? (
-          "<sourceDefined>"
-        ) : null}
-      </Cell>
-      <Cell>
-        {cursorType === "required" ? (
-          <Popout
-            options={dropdownFields}
-            value={cursorField}
-            placeholder={
-              <FormattedMessage id="connectionForm.cursor.searchPlaceholder" />
-            }
-            onChange={(op) => onCursorChange(op.value)}
-            targetComponent={({ onOpen }) => (
-              <div onClick={onOpen}>
-                {stream.config.cursorField.join(".")}
-                <Arrow icon={faSortDown} />
-                <Tooltip items={stream.config.cursorField} />
-              </div>
-            )}
-          />
-        ) : cursorType === "sourceDefined" ? (
-          "<sourceDefined>"
-        ) : null}
-      </Cell>
+        )}
+      </HeaderCell>
+      <HeaderCell ellipsis title={destNamespace}>
+        {destNamespace}
+      </HeaderCell>
+      <HeaderCell ellipsis title={destName}>
+        {destName}
+      </HeaderCell>
     </>
   );
 };

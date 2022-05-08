@@ -29,13 +29,14 @@ import io.airbyte.db.Databases;
 import io.airbyte.db.JdbcCompatibleSourceOperations;
 import io.airbyte.db.SqlDatabase;
 import io.airbyte.db.jdbc.JdbcDatabase;
-import io.airbyte.db.jdbc.JdbcStreamingQueryConfiguration;
+import io.airbyte.db.jdbc.JdbcUtils;
+import io.airbyte.db.jdbc.streaming.JdbcStreamingQueryConfig;
 import io.airbyte.integrations.base.Source;
 import io.airbyte.integrations.source.jdbc.dto.JdbcPrivilegeDto;
 import io.airbyte.integrations.source.relationaldb.AbstractRelationalDbSource;
 import io.airbyte.integrations.source.relationaldb.TableInfo;
 import io.airbyte.protocol.models.CommonField;
-import io.airbyte.protocol.models.JsonSchemaPrimitive;
+import io.airbyte.protocol.models.JsonSchemaType;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -48,6 +49,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.apache.commons.lang3.tuple.ImmutablePair;
@@ -64,16 +66,16 @@ public abstract class AbstractJdbcSource<Datatype> extends AbstractRelationalDbS
   private static final Logger LOGGER = LoggerFactory.getLogger(AbstractJdbcSource.class);
 
   protected final String driverClass;
-  protected final JdbcStreamingQueryConfiguration jdbcStreamingQueryConfiguration;
+  protected final Supplier<JdbcStreamingQueryConfig> streamingQueryConfigProvider;
   protected final JdbcCompatibleSourceOperations<Datatype> sourceOperations;
 
   protected String quoteString;
 
   public AbstractJdbcSource(final String driverClass,
-                            final JdbcStreamingQueryConfiguration jdbcStreamingQueryConfiguration,
+                            final Supplier<JdbcStreamingQueryConfig> streamingQueryConfigProvider,
                             final JdbcCompatibleSourceOperations<Datatype> sourceOperations) {
     this.driverClass = driverClass;
-    this.jdbcStreamingQueryConfiguration = jdbcStreamingQueryConfiguration;
+    this.streamingQueryConfigProvider = streamingQueryConfigProvider;
     this.sourceOperations = sourceOperations;
   }
 
@@ -132,8 +134,8 @@ public abstract class AbstractJdbcSource<Datatype> extends AbstractRelationalDbS
                 // read the column metadata Json object, and determine its type
                 .map(f -> {
                   final Datatype datatype = getFieldType(f);
-                  final JsonSchemaPrimitive jsonType = getType(datatype);
-                  LOGGER.info("Table {} column {} (type {}[{}]) -> Json type {}",
+                  final JsonSchemaType jsonType = getType(datatype);
+                  LOGGER.info("Table {} column {} (type {}[{}]) -> {}",
                       fields.get(0).get(INTERNAL_TABLE_NAME).asText(),
                       f.get(INTERNAL_COLUMN_NAME).asText(),
                       f.get(INTERNAL_COLUMN_TYPE_NAME).asText(),
@@ -146,11 +148,11 @@ public abstract class AbstractJdbcSource<Datatype> extends AbstractRelationalDbS
         .collect(Collectors.toList());
   }
 
-  private Predicate<JsonNode> excludeNotAccessibleTables(final Set<String> internalSchemas,
-                                                         final Set<JdbcPrivilegeDto> tablesWithSelectGrantPrivilege) {
+  protected Predicate<JsonNode> excludeNotAccessibleTables(final Set<String> internalSchemas,
+                                                           final Set<JdbcPrivilegeDto> tablesWithSelectGrantPrivilege) {
     return jsonNode -> {
       if (tablesWithSelectGrantPrivilege.isEmpty()) {
-        return !internalSchemas.contains(jsonNode.get(INTERNAL_SCHEMA_NAME).asText());
+        return isNotInternalSchema(jsonNode, internalSchemas);
       }
       return tablesWithSelectGrantPrivilege.stream()
           .anyMatch(e -> e.getSchemaName().equals(jsonNode.get(INTERNAL_SCHEMA_NAME).asText()))
@@ -158,6 +160,12 @@ public abstract class AbstractJdbcSource<Datatype> extends AbstractRelationalDbS
               .anyMatch(e -> e.getTableName().equals(jsonNode.get(INTERNAL_TABLE_NAME).asText()))
           && !internalSchemas.contains(jsonNode.get(INTERNAL_SCHEMA_NAME).asText());
     };
+  }
+
+  // needs to override isNotInternalSchema for connectors that override
+  // getPrivilegesTableForCurrentUser()
+  protected boolean isNotInternalSchema(final JsonNode jsonNode, final Set<String> internalSchemas) {
+    return !internalSchemas.contains(jsonNode.get(INTERNAL_SCHEMA_NAME).asText());
   }
 
   /**
@@ -193,7 +201,7 @@ public abstract class AbstractJdbcSource<Datatype> extends AbstractRelationalDbS
   }
 
   @Override
-  public JsonSchemaPrimitive getType(final Datatype columnType) {
+  public JsonSchemaType getType(final Datatype columnType) {
     return sourceOperations.getJsonType(columnType);
   }
 
@@ -255,7 +263,7 @@ public abstract class AbstractJdbcSource<Datatype> extends AbstractRelationalDbS
     LOGGER.info("Queueing query for table: {}", tableName);
     return AutoCloseableIterators.lazyIterator(() -> {
       try {
-        final Stream<JsonNode> stream = database.query(
+        final Stream<JsonNode> stream = database.unsafeQuery(
             connection -> {
               LOGGER.info("Preparing query for table: {}", tableName);
               final String sql = String.format("SELECT %s FROM %s WHERE %s > ?",
@@ -282,17 +290,21 @@ public abstract class AbstractJdbcSource<Datatype> extends AbstractRelationalDbS
     final JsonNode jdbcConfig = toDatabaseConfig(config);
 
     final JdbcDatabase database = Databases.createStreamingJdbcDatabase(
-        jdbcConfig.get("username").asText(),
+        jdbcConfig.has("username") ? jdbcConfig.get("username").asText() : null,
         jdbcConfig.has("password") ? jdbcConfig.get("password").asText() : null,
         jdbcConfig.get("jdbc_url").asText(),
         driverClass,
-        jdbcStreamingQueryConfiguration,
-        jdbcConfig.has("connection_properties") ? jdbcConfig.get("connection_properties").asText() : null,
+        streamingQueryConfigProvider,
+        JdbcUtils.parseJdbcParameters(jdbcConfig, "connection_properties", getJdbcParameterDelimiter()),
         sourceOperations);
 
     quoteString = (quoteString == null ? database.getMetaData().getIdentifierQuoteString() : quoteString);
 
     return database;
+  }
+
+  protected String getJdbcParameterDelimiter() {
+    return "&";
   }
 
 }

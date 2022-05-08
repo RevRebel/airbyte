@@ -4,26 +4,30 @@
 
 package io.airbyte.db.mongodb;
 
+import static java.util.Arrays.asList;
 import static org.bson.BsonType.ARRAY;
 import static org.bson.BsonType.DOCUMENT;
+import static org.bson.codecs.configuration.CodecRegistries.fromProviders;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.api.client.util.DateTime;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
+import com.mongodb.DBRefCodecProvider;
 import com.mongodb.client.AggregateIterable;
 import com.mongodb.client.MongoCollection;
 import io.airbyte.commons.json.Jsons;
 import io.airbyte.commons.util.MoreIterators;
 import io.airbyte.db.DataTypeUtils;
-import io.airbyte.protocol.models.JsonSchemaPrimitive;
+import io.airbyte.protocol.models.CommonField;
+import io.airbyte.protocol.models.JsonSchemaType;
+import io.airbyte.protocol.models.TreeNode;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import org.bson.BsonBinary;
 import org.bson.BsonDateTime;
 import org.bson.BsonDocument;
@@ -36,6 +40,9 @@ import org.bson.BsonString;
 import org.bson.BsonTimestamp;
 import org.bson.BsonType;
 import org.bson.Document;
+import org.bson.codecs.*;
+import org.bson.codecs.configuration.CodecRegistry;
+import org.bson.codecs.jsr310.Jsr310CodecProvider;
 import org.bson.types.Decimal128;
 import org.bson.types.ObjectId;
 import org.bson.types.Symbol;
@@ -51,14 +58,14 @@ public class MongoUtils {
   private static final String AIRBYTE_SUFFIX = "_aibyte_transform";
   private static final int DISCOVER_LIMIT = 10000;
 
-  public static JsonSchemaPrimitive getType(final BsonType dataType) {
+  public static JsonSchemaType getType(final BsonType dataType) {
     return switch (dataType) {
-      case BOOLEAN -> JsonSchemaPrimitive.BOOLEAN;
-      case INT32, INT64, DOUBLE, DECIMAL128 -> JsonSchemaPrimitive.NUMBER;
-      case STRING, SYMBOL, BINARY, DATE_TIME, TIMESTAMP, OBJECT_ID, REGULAR_EXPRESSION, JAVASCRIPT -> JsonSchemaPrimitive.STRING;
-      case ARRAY -> JsonSchemaPrimitive.ARRAY;
-      case DOCUMENT, JAVASCRIPT_WITH_SCOPE -> JsonSchemaPrimitive.OBJECT;
-      default -> JsonSchemaPrimitive.STRING;
+      case BOOLEAN -> JsonSchemaType.BOOLEAN;
+      case INT32, INT64, DOUBLE, DECIMAL128 -> JsonSchemaType.NUMBER;
+      case STRING, SYMBOL, BINARY, DATE_TIME, TIMESTAMP, OBJECT_ID, REGULAR_EXPRESSION, JAVASCRIPT -> JsonSchemaType.STRING;
+      case ARRAY -> JsonSchemaType.ARRAY;
+      case DOCUMENT, JAVASCRIPT_WITH_SCOPE -> JsonSchemaType.OBJECT;
+      default -> JsonSchemaType.STRING;
     };
   }
 
@@ -85,6 +92,16 @@ public class MongoUtils {
     } catch (final Exception e) {
       LOGGER.error(String.format("Failed to get BsonValue for field type %s", type), e.getMessage());
       return value;
+    }
+  }
+
+  public static CommonField<BsonType> nodeToCommonField(TreeNode<CommonField<BsonType>> node) {
+    CommonField<BsonType> field = node.getData();
+    if (node.hasChildren()) {
+      List<CommonField<BsonType>> subFields = node.getChildren().stream().map(MongoUtils::nodeToCommonField).toList();
+      return new CommonField<>(field.getName(), field.getType(), subFields);
+    } else {
+      return new CommonField<>(field.getName(), field.getType());
     }
   }
 
@@ -182,21 +199,52 @@ public class MongoUtils {
    * @param collection mongo collection
    * @return map of unique fields and its type
    */
-  public static Map<String, BsonType> getUniqueFields(final MongoCollection<Document> collection) {
+  public static List<TreeNode<CommonField<BsonType>>> getUniqueFields(final MongoCollection<Document> collection) {
+    var allkeys = new HashSet<>(getFieldsName(collection));
 
-    Map<String, BsonType> result = new HashMap<>();
-    var allkeys = getFieldsName(collection);
-    allkeys.forEach(key -> {
+    return allkeys.stream().map(key -> {
       var types = getTypes(collection, key);
-      addUniqueType(result, key, types);
+      var type = getUniqueType(types);
+      var fieldNode = new TreeNode<>(new CommonField<>(transformName(types, key), type));
+      if (type.equals(DOCUMENT)) {
+        setSubFields(collection, fieldNode, key);
+      }
+      return fieldNode;
+    }).toList();
+  }
+
+  /**
+   * If one field has different types in 2 and more documents, the name is transformed to
+   * 'name_aibyte_transform'.
+   *
+   * @param types list with field types
+   * @param name field name
+   * @return name
+   */
+  private static String transformName(List<String> types, String name) {
+    return types.size() != 1 ? name + AIRBYTE_SUFFIX : name;
+  }
+
+  private static void setSubFields(final MongoCollection<Document> collection, TreeNode<CommonField<BsonType>> parentNode, String pathToField) {
+    var nestedKeys = getFieldsName(collection, pathToField);
+    nestedKeys.forEach(key -> {
+      var types = getTypes(collection, pathToField + "." + key);
+      var nestedType = getUniqueType(types);
+      var childNode = parentNode.addChild(new CommonField<>(transformName(types, key), nestedType));
+      if (nestedType.equals(DOCUMENT)) {
+        setSubFields(collection, childNode, pathToField + "." + key);
+      }
     });
-    return result;
   }
 
   private static List<String> getFieldsName(MongoCollection<Document> collection) {
+    return getFieldsName(collection, "$ROOT");
+  }
+
+  private static List<String> getFieldsName(MongoCollection<Document> collection, String fieldName) {
     AggregateIterable<Document> output = collection.aggregate(Arrays.asList(
         new Document("$limit", DISCOVER_LIMIT),
-        new Document("$project", new Document("arrayofkeyvalue", new Document("$objectToArray", "$$ROOT"))),
+        new Document("$project", new Document("arrayofkeyvalue", new Document("$objectToArray", "$" + fieldName))),
         new Document("$unwind", "$arrayofkeyvalue"),
         new Document("$group", new Document("_id", null).append("allkeys", new Document("$addToSet", "$arrayofkeyvalue.k")))));
     if (output.cursor().hasNext()) {
@@ -227,19 +275,18 @@ public class MongoUtils {
     return listOfTypes;
   }
 
-  private static void addUniqueType(Map<String, BsonType> map,
-                                    String fieldName,
-                                    List<String> types) {
+  private static BsonType getUniqueType(List<String> types) {
     if (types.size() != 1) {
-      map.put(fieldName + AIRBYTE_SUFFIX, BsonType.STRING);
+      return BsonType.STRING;
     } else {
       var type = types.get(0);
-      map.put(fieldName, getBsonTypeByTypeAlias(type));
+      return getBsonTypeByTypeAlias(type);
     }
   }
 
   private static BsonType getBsonTypeByTypeAlias(String typeAlias) {
     return switch (typeAlias) {
+      case "object" -> BsonType.DOCUMENT;
       case "double" -> BsonType.DOUBLE;
       case "string" -> BsonType.STRING;
       case "objectId" -> BsonType.OBJECT_ID;
@@ -263,7 +310,20 @@ public class MongoUtils {
 
   private static BsonDocument toBsonDocument(final Document document) {
     try {
-      return document.toBsonDocument();
+      CodecRegistry customCodecRegistry =
+          fromProviders(asList(
+              new ValueCodecProvider(),
+              new BsonValueCodecProvider(),
+              new DocumentCodecProvider(),
+              new IterableCodecProvider(),
+              new MapCodecProvider(),
+              new Jsr310CodecProvider(),
+              new JsonObjectCodecProvider(),
+              new BsonCodecProvider(),
+              new DBRefCodecProvider()));
+
+      // Override the default codec registry
+      return document.toBsonDocument(BsonDocument.class, customCodecRegistry);
     } catch (final Exception e) {
       LOGGER.error("Exception while converting Document to BsonDocument: {}", e.getMessage());
       throw new RuntimeException(e);

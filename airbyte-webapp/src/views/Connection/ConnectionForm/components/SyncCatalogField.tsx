@@ -1,75 +1,192 @@
+import { FieldProps } from "formik";
 import React, { useCallback, useMemo, useState } from "react";
-import { FieldProps, setIn } from "formik";
 import { FormattedMessage } from "react-intl";
 import styled from "styled-components";
 
+import { CheckBox } from "components";
+import { Cell, Header } from "components/SimpleTableComponents";
+
+import { useConfig } from "config";
 import type { DestinationSyncMode } from "core/domain/catalog";
 import { SyncSchemaStream } from "core/domain/catalog";
-
-import { CheckBox, LabeledRadioButton } from "components";
-import { Cell, Header } from "components/SimpleTableComponents";
-import CatalogTree from "views/Connection/CatalogTree";
-import Search from "./Search";
-import SectionTitle from "./SectionTitle";
+import { BatchEditProvider, useBulkEdit } from "hooks/services/BulkEdit/BulkEditService";
 import { naturalComparatorBy } from "utils/objects";
-import { SyncCatalogFilters } from "./SyncCatalogFilters";
+import CatalogTree from "views/Connection/CatalogTree";
 
-const TreeViewContainer = styled.div`
-  width: 100%;
-  background: ${({ theme }) => theme.greyColor0};
+import { BulkHeader } from "../../CatalogTree/components/BulkHeader";
+import { ConnectionFormMode } from "../ConnectionForm";
+import InformationToolTip from "./InformationToolTip";
+import Search from "./Search";
+
+const TreeViewContainer = styled.div<{ mode?: ConnectionFormMode }>`
   margin-bottom: 29px;
-  border-radius: 4px;
   max-height: 600px;
   overflow-y: auto;
-  -webkit-overlay: true;
+  --webkit-overlay: true;
+  // Find better way (for checkbox)
+  margin-left: -43px;
+  padding-left: ${({ mode }) => (mode === "readonly" ? "0" : "43px")};
+  width: calc(100% + 43px);
 `;
 
 const SchemaHeader = styled(Header)`
-  min-height: 28px;
-  margin-bottom: 5px;
+  min-height: 33px;
 `;
 
-const SchemaTitle = styled(SectionTitle)`
-  display: inline-block;
-  margin: 0 11px 13px 0;
+const SubtitleCell = styled(Cell).attrs(() => ({ lighter: true }))`
+  font-size: 10px;
+  line-height: 12px;
+  border-top: 1px solid ${({ theme }) => theme.greyColor0};
+  padding-top: 5px;
 `;
 
-const SelectAll = styled.div`
-  margin: 0 9px 0 30px;
+const CheckboxCell = styled(Cell)`
+  max-width: 43px;
+  text-align: center;
+  margin-left: -43px;
 `;
 
-const NamespaceTitleCell = styled(Cell).attrs(() => ({ lighter: true }))`
+const ArrowCell = styled(Cell)`
+  width: 40px;
+  max-width: 40px;
+`;
+
+const StreamsContent = styled.div`
+  margin-left: 43px;
+`;
+
+const ClearSubtitleCell = styled(SubtitleCell)`
+  border-top: none;
+`;
+
+const HeaderBlock = styled.div`
+  margin: 10px 0 6px;
   display: flex;
-  flex-direction: row;
+  justify-content: space-between;
   align-items: center;
-`;
-
-const SearchContent = styled.div`
-  display: flex;
   flex-direction: row;
-  align-items: center;
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 17px;
 `;
 
-const RadioButtonControl = styled(LabeledRadioButton)`
-  margin: 0 0 0 5px;
+const NextLineText = styled.div`
+  margin-top: 10px;
 `;
 
-type SchemaViewProps = {
+const LearnMoreLink = styled.a`
+  opacity: 0.6;
+  display: block;
+  margin-top: 10px;
+  color: ${({ theme }) => theme.whiteColor};
+  text-decoration: none;
+
+  &:hover {
+    opacity: 0.9;
+  }
+`;
+
+interface SchemaViewProps extends FieldProps<SyncSchemaStream[]> {
   additionalControl?: React.ReactNode;
   destinationSupportedSyncModes: DestinationSyncMode[];
-} & FieldProps<SyncSchemaStream[]>;
+  mode?: ConnectionFormMode;
+}
+
+const CatalogHeader: React.FC<{ mode?: ConnectionFormMode }> = ({ mode }) => {
+  const config = useConfig();
+  const { onCheckAll, selectedBatchNodeIds, allChecked } = useBulkEdit();
+  return (
+    <SchemaHeader>
+      {mode !== "readonly" && (
+        <CheckboxCell>
+          <CheckBox
+            onChange={onCheckAll}
+            indeterminate={selectedBatchNodeIds.length > 0 && !allChecked}
+            checked={allChecked}
+          />
+        </CheckboxCell>
+      )}
+      {mode !== "readonly" && <Cell flex={0.2} />}
+      <Cell lighter flex={0.4}>
+        <FormattedMessage id="sources.sync" />
+      </Cell>
+      <Cell lighter>
+        <FormattedMessage id="sources.source" />
+        <InformationToolTip>
+          <FormattedMessage id="connectionForm.source.info" />
+        </InformationToolTip>
+      </Cell>
+      <Cell />
+      <Cell lighter flex={1.5}>
+        <FormattedMessage id="form.syncMode" />
+        <InformationToolTip>
+          <FormattedMessage id="connectionForm.syncType.info" />
+          <LearnMoreLink target="_blank" href={config.ui.syncModeLink}>
+            <FormattedMessage id="form.entrypoint.docs" />
+          </LearnMoreLink>
+        </InformationToolTip>
+      </Cell>
+      <Cell lighter>
+        <FormattedMessage id="form.cursorField" />
+        <InformationToolTip>
+          <FormattedMessage id="connectionForm.cursor.info" />
+        </InformationToolTip>
+      </Cell>
+      <Cell lighter>
+        <FormattedMessage id="form.primaryKey" />
+        <InformationToolTip>
+          <FormattedMessage id="connectionForm.primaryKey.info" />
+        </InformationToolTip>
+      </Cell>
+      <Cell lighter>
+        <FormattedMessage id="connector.destination" />
+        <InformationToolTip>
+          <FormattedMessage id="connectionForm.destinationName.info" />
+          <NextLineText>
+            <FormattedMessage id="connectionForm.destinationStream.info" />
+          </NextLineText>
+        </InformationToolTip>
+      </Cell>
+      <Cell />
+    </SchemaHeader>
+  );
+};
+
+const CatalogSubheader: React.FC<{ mode?: ConnectionFormMode }> = ({ mode }) => (
+  <SchemaHeader>
+    {mode !== "readonly" && <CheckboxCell />}
+    <ArrowCell />
+    <ClearSubtitleCell flex={mode === "readonly" ? 0.1 : 0.4} />
+    <SubtitleCell>
+      <FormattedMessage id="form.namespace" />
+    </SubtitleCell>
+    <SubtitleCell>
+      <FormattedMessage id="form.streamName" />
+    </SubtitleCell>
+    <SubtitleCell flex={1.5}>
+      <FormattedMessage id="form.sourceAndDestination" />
+    </SubtitleCell>
+    <ClearSubtitleCell />
+    <ClearSubtitleCell />
+    <SubtitleCell>
+      <FormattedMessage id="form.namespace" />
+    </SubtitleCell>
+    <SubtitleCell>
+      <FormattedMessage id="form.streamName" />
+    </SubtitleCell>
+  </SchemaHeader>
+);
 
 const SyncCatalogField: React.FC<SchemaViewProps> = ({
   destinationSupportedSyncModes,
   additionalControl,
   field,
   form,
+  mode,
 }) => {
   const { value: streams, name: fieldName } = field;
 
   const [searchString, setSearchString] = useState("");
-  const [filterMode, setFilterMode] = useState(SyncCatalogFilters.All);
-
   const setField = form.setFieldValue;
 
   const onChangeSchema = useCallback(
@@ -78,16 +195,12 @@ const SyncCatalogField: React.FC<SchemaViewProps> = ({
   );
 
   const onChangeStream = useCallback(
-    (newValue: SyncSchemaStream) =>
-      onChangeSchema(
-        streams.map((str) => (str.id === newValue.id ? newValue : str))
-      ),
+    (newValue: SyncSchemaStream) => onChangeSchema(streams.map((str) => (str.id === newValue.id ? newValue : str))),
     [streams, onChangeSchema]
   );
 
   const sortedSchema = useMemo(
-    () =>
-      streams.sort(naturalComparatorBy((syncStream) => syncStream.stream.name)),
+    () => streams.sort(naturalComparatorBy((syncStream) => syncStream.stream.name)),
     [streams]
   );
 
@@ -95,110 +208,39 @@ const SyncCatalogField: React.FC<SchemaViewProps> = ({
     const filters: Array<(s: SyncSchemaStream) => boolean> = [
       (_: SyncSchemaStream) => true,
       searchString
-        ? (stream: SyncSchemaStream) =>
-            stream.stream.name
-              .toLowerCase()
-              .includes(searchString.toLowerCase())
-        : null,
-      filterMode !== SyncCatalogFilters.All
-        ? (stream: SyncSchemaStream) =>
-            (filterMode === SyncCatalogFilters.Selected &&
-              stream.config.selected) ||
-            (filterMode === SyncCatalogFilters.NotSelected &&
-              !stream.config.selected)
+        ? (stream: SyncSchemaStream) => stream.stream.name.toLowerCase().includes(searchString.toLowerCase())
         : null,
     ].filter(Boolean) as Array<(s: SyncSchemaStream) => boolean>;
 
     return sortedSchema.filter((stream) => filters.every((f) => f(stream)));
-  }, [searchString, filterMode, sortedSchema]);
-
-  const hasSelectedItem = useMemo(
-    () => filteredStreams.some((streamNode) => streamNode.config.selected),
-    [filteredStreams]
-  );
-
-  const onCheckAll = useCallback(() => {
-    const allSelectedValues = !hasSelectedItem;
-
-    const newSchema = filteredStreams.map((streamNode) =>
-      setIn(streamNode, "config.selected", allSelectedValues)
-    );
-
-    onChangeSchema(newSchema);
-  }, [hasSelectedItem, onChangeSchema, filteredStreams]);
-
+  }, [searchString, sortedSchema]);
   return (
-    <>
-      <div>
-        <SchemaTitle>
-          <FormattedMessage id="form.dataSync" />
-        </SchemaTitle>
-        {additionalControl}
-      </div>
-      <SearchContent>
-        <Search onSearch={setSearchString} />
-        <RadioButtonControl
-          onChange={(value) => {
-            setFilterMode(value.target.value as SyncCatalogFilters);
-          }}
-          name="FilterAll"
-          value={SyncCatalogFilters.All}
-          checked={filterMode === SyncCatalogFilters.All}
-          label={<FormattedMessage id="form.all" />}
-        />
-        <RadioButtonControl
-          onChange={(value) => {
-            setFilterMode(value.target.value as SyncCatalogFilters);
-          }}
-          name="FilterSelected"
-          value={SyncCatalogFilters.Selected}
-          checked={filterMode === SyncCatalogFilters.Selected}
-          label={<FormattedMessage id="form.selected" />}
-        />
-        <RadioButtonControl
-          onChange={(value) => {
-            setFilterMode(value.target.value as SyncCatalogFilters);
-          }}
-          name="FilterNotSelected"
-          value={SyncCatalogFilters.NotSelected}
-          checked={filterMode === SyncCatalogFilters.NotSelected}
-          label={<FormattedMessage id="form.notSelected" />}
-        />
-      </SearchContent>
-      <SchemaHeader>
-        <NamespaceTitleCell flex={1.5}>
-          <SelectAll>
-            <CheckBox onChange={onCheckAll} checked={hasSelectedItem} />
-          </SelectAll>
-          <FormattedMessage id="form.sourceStreamName" />
-        </NamespaceTitleCell>
-        <Cell lighter>
-          <FormattedMessage id="form.sourceNamespace" />
-        </Cell>
-        <Cell lighter>
-          <FormattedMessage id="form.destinationNamespace" />
-        </Cell>
-        <Cell lighter>
-          <FormattedMessage id="form.destinationStreamName" />
-        </Cell>
-        <Cell lighter flex={1.5}>
-          <FormattedMessage id="form.syncMode" />
-        </Cell>
-        <Cell lighter>
-          <FormattedMessage id="form.primaryKey" />
-        </Cell>
-        <Cell lighter>
-          <FormattedMessage id="form.cursorField" />
-        </Cell>
-      </SchemaHeader>
-      <TreeViewContainer>
-        <CatalogTree
-          streams={filteredStreams}
-          onChangeStream={onChangeStream}
-          destinationSupportedSyncModes={destinationSupportedSyncModes}
-        />
-      </TreeViewContainer>
-    </>
+    <BatchEditProvider nodes={streams} update={onChangeSchema}>
+      <HeaderBlock>
+        {mode !== "readonly" ? (
+          <>
+            <FormattedMessage id="form.dataSync" />
+            {additionalControl}
+          </>
+        ) : (
+          <FormattedMessage id="form.dataSync.readonly" />
+        )}
+      </HeaderBlock>
+      {mode !== "readonly" && <Search onSearch={setSearchString} />}
+      <StreamsContent>
+        <CatalogHeader mode={mode} />
+        <CatalogSubheader mode={mode} />
+        <BulkHeader destinationSupportedSyncModes={destinationSupportedSyncModes} />
+        <TreeViewContainer mode={mode}>
+          <CatalogTree
+            streams={filteredStreams}
+            onChangeStream={onChangeStream}
+            destinationSupportedSyncModes={destinationSupportedSyncModes}
+            mode={mode}
+          />
+        </TreeViewContainer>
+      </StreamsContent>
+    </BatchEditProvider>
   );
 };
 

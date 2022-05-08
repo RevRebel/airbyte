@@ -5,14 +5,19 @@
 package io.airbyte.bootloader;
 
 import com.google.common.annotations.VisibleForTesting;
+import io.airbyte.commons.features.EnvVariableFeatureFlags;
+import io.airbyte.commons.features.FeatureFlags;
 import io.airbyte.commons.resources.MoreResources;
 import io.airbyte.commons.version.AirbyteVersion;
 import io.airbyte.config.Configs;
 import io.airbyte.config.EnvConfigs;
 import io.airbyte.config.StandardWorkspace;
 import io.airbyte.config.init.YamlSeedConfigPersistence;
+import io.airbyte.config.persistence.ConfigPersistence;
 import io.airbyte.config.persistence.ConfigRepository;
 import io.airbyte.config.persistence.DatabaseConfigPersistence;
+import io.airbyte.config.persistence.split_secrets.JsonSecretsProcessor;
+import io.airbyte.config.persistence.split_secrets.SecretPersistence;
 import io.airbyte.db.Database;
 import io.airbyte.db.instance.DatabaseMigrator;
 import io.airbyte.db.instance.configs.ConfigsDatabaseInstance;
@@ -46,11 +51,17 @@ public class BootloaderApp {
   private static final AirbyteVersion VERSION_BREAK = new AirbyteVersion("0.32.0-alpha");
 
   private final Configs configs;
-  private Runnable postLoadExecution;
+  private final Runnable postLoadExecution;
+  private final FeatureFlags featureFlags;
+  private SecretMigrator secretMigrator;
+  private ConfigPersistence configPersistence;
+  private Database configDatabase;
+  private Database jobDatabase;
+  private JobPersistence jobPersistence;
 
   @VisibleForTesting
-  public BootloaderApp(Configs configs) {
-    this.configs = configs;
+  public BootloaderApp(final Configs configs, final FeatureFlags featureFlags) {
+    this(configs, () -> {}, featureFlags, null);
   }
 
   /**
@@ -61,36 +72,43 @@ public class BootloaderApp {
    * @param configs
    * @param postLoadExecution
    */
-  public BootloaderApp(Configs configs, Runnable postLoadExecution) {
+  public BootloaderApp(final Configs configs,
+                       final Runnable postLoadExecution,
+                       final FeatureFlags featureFlags,
+                       final SecretMigrator secretMigrator) {
     this.configs = configs;
     this.postLoadExecution = postLoadExecution;
+    this.featureFlags = featureFlags;
+    this.secretMigrator = secretMigrator;
+
+    initPersistences();
   }
 
-  public BootloaderApp() {
-    configs = new EnvConfigs();
+  public BootloaderApp(final Configs configs, final FeatureFlags featureFlags, final SecretMigrator secretMigrator) {
+    this.configs = configs;
+    this.featureFlags = featureFlags;
+
+    initPersistences();
+
     postLoadExecution = () -> {
       try {
-        final Database configDatabase =
-            new ConfigsDatabaseInstance(configs.getConfigDatabaseUser(), configs.getConfigDatabasePassword(), configs.getConfigDatabaseUrl())
-                .getAndInitialize();
-        final DatabaseConfigPersistence configPersistence = new DatabaseConfigPersistence(configDatabase);
         configPersistence.loadData(YamlSeedConfigPersistence.getDefault());
+
+        if (featureFlags.forceSecretMigration() || !jobPersistence.isSecretMigrated()) {
+          secretMigrator.migrateSecrets();
+        }
         LOGGER.info("Loaded seed data..");
-      } catch (IOException e) {
-        e.printStackTrace();
+      } catch (final IOException | JsonValidationException e) {
+        throw new RuntimeException(e);
       }
     };
+
   }
 
   public void load() throws Exception {
     LOGGER.info("Setting up config database and default workspace..");
 
-    try (
-        final Database configDatabase =
-            new ConfigsDatabaseInstance(configs.getConfigDatabaseUser(), configs.getConfigDatabasePassword(), configs.getConfigDatabaseUrl())
-                .getAndInitialize();
-        final Database jobDatabase =
-            new JobsDatabaseInstance(configs.getDatabaseUser(), configs.getDatabasePassword(), configs.getDatabaseUrl()).getAndInitialize()) {
+    try {
       LOGGER.info("Created initial jobs and configs database...");
 
       final JobPersistence jobPersistence = new DefaultJobPersistence(jobDatabase);
@@ -100,9 +118,8 @@ public class BootloaderApp {
       runFlywayMigration(configs, configDatabase, jobDatabase);
       LOGGER.info("Ran Flyway migrations...");
 
-      final DatabaseConfigPersistence configPersistence = new DatabaseConfigPersistence(configDatabase);
       final ConfigRepository configRepository =
-          new ConfigRepository(configPersistence.withValidation(), null, Optional.empty(), Optional.empty());
+          new ConfigRepository(configPersistence, configDatabase);
 
       createWorkspaceIfNoneExists(configRepository);
       LOGGER.info("Default workspace created..");
@@ -112,18 +129,63 @@ public class BootloaderApp {
 
       jobPersistence.setVersion(currAirbyteVersion.serialize());
       LOGGER.info("Set version to {}", currAirbyteVersion);
+
+      postLoadExecution.run();
+    } finally {
+      jobDatabase.close();
+      configDatabase.close();
     }
 
-    if (postLoadExecution != null) {
-      postLoadExecution.run();
-      LOGGER.info("Finished running post load Execution..");
-    }
+    LOGGER.info("Finished running post load Execution..");
 
     LOGGER.info("Finished bootstrapping Airbyte environment..");
   }
 
-  public static void main(String[] args) throws Exception {
-    final var bootloader = new BootloaderApp();
+  private static Database getConfigDatabase(final Configs configs) throws IOException {
+    return new ConfigsDatabaseInstance(
+        configs.getConfigDatabaseUser(),
+        configs.getConfigDatabasePassword(),
+        configs.getConfigDatabaseUrl()).getAndInitialize();
+  }
+
+  private static ConfigPersistence getConfigPersistence(final Database configDatabase) throws IOException {
+    final JsonSecretsProcessor jsonSecretsProcessor = JsonSecretsProcessor.builder()
+        .maskSecrets(true)
+        .copySecrets(true)
+        .build();
+
+    return DatabaseConfigPersistence.createWithValidation(configDatabase, jsonSecretsProcessor);
+  }
+
+  private static Database getJobDatabase(final Configs configs) throws IOException {
+    return new JobsDatabaseInstance(configs.getDatabaseUser(), configs.getDatabasePassword(), configs.getDatabaseUrl()).getAndInitialize();
+  }
+
+  private static JobPersistence getJobPersistence(final Database jobDatabase) throws IOException {
+    return new DefaultJobPersistence(jobDatabase);
+  }
+
+  private void initPersistences() {
+    try {
+      configDatabase = getConfigDatabase(configs);
+      configPersistence = getConfigPersistence(configDatabase);
+      jobDatabase = getJobDatabase(configs);
+      jobPersistence = getJobPersistence(jobDatabase);
+    } catch (final IOException e) {
+      e.printStackTrace();
+    }
+  }
+
+  public static void main(final String[] args) throws Exception {
+    final Configs configs = new EnvConfigs();
+    final FeatureFlags featureFlags = new EnvVariableFeatureFlags();
+    final Database configDatabase = getConfigDatabase(configs);
+    final ConfigPersistence configPersistence = getConfigPersistence(configDatabase);
+    final Database jobDatabase = getJobDatabase(configs);
+    final JobPersistence jobPersistence = getJobPersistence(jobDatabase);
+    final SecretMigrator secretMigrator = new SecretMigrator(configPersistence, jobPersistence, SecretPersistence.getLongLived(configs));
+    final Optional<SecretPersistence> secretPersistence = SecretPersistence.getLongLived(configs);
+    final var bootloader = new BootloaderApp(configs, featureFlags, secretMigrator);
     bootloader.load();
   }
 
@@ -156,7 +218,8 @@ public class BootloaderApp {
     configRepository.writeStandardWorkspace(workspace);
   }
 
-  private static void assertNonBreakingMigration(JobPersistence jobPersistence, AirbyteVersion airbyteVersion) throws IOException {
+  private static void assertNonBreakingMigration(final JobPersistence jobPersistence, final AirbyteVersion airbyteVersion)
+      throws IOException {
     // version in the database when the server main method is called. may be empty if this is the first
     // time the server is started.
     LOGGER.info("Checking illegal upgrade..");
